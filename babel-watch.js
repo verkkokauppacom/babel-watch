@@ -200,27 +200,38 @@ function handleFileLoad(filename, callback) {
   }
 }
 
+function killChildProcess(childProcess) {
+  return new Promise((resolve, reject) => {
+    let done = false
+    childProcess.on('exit', () => {
+      if (done) return
+      done = true
+      resolve()
+    })
+
+    setTimeout(() => {
+      if (done) return
+      console.log('Child process is HUP resistant, using SIGKILL')
+      childProcess.kill('SIGKILL');
+    }, 2000)
+
+    setTimeout(() => {
+      if (done) return
+      done = true
+      reject(new Error('Could not kill child process with SIGKILL'))
+
+    }, 4000)
+    childProcess.kill('SIGHUP');
+  })
+}
+
 function killApp() {
   if (childApp) {
-    const currentPipeFd = pipeFd;
-    const currentPipeFilename = pipeFilename;
-    childApp.on('exit', () => {
-      if (currentPipeFd) {
-        fs.closeSync(currentPipeFd); // silently close pipe fd
-      }
-      if (currentPipeFilename) {
-        fs.unlinkSync(currentPipeFilename); // silently remove old pipe file
-      }
-      restartAppInternal();
-    });
-    try {
-      childApp.kill('SIGHUP');
-    } catch (error) {
-      childApp.kill('SIGKILL');
-    }
-    pipeFd = undefined;
-    pipeFilename = undefined;
-    childApp = undefined;
+    killChildProcess(childApp).then(restartAppInternal,
+      (e) => {
+        console.log('Could not kill subprocess, aborting', e)
+        process.exit(1)
+      })
   }
 }
 
@@ -279,6 +290,30 @@ function restartAppInternal() {
   }
 
   const app = fork(path.resolve(__dirname, 'runner.js'), { execArgv: runnerExecArgv });
+
+  app.on('error', (err) => {
+    console.log("Runner error: ", err);
+    process.exit(1);
+  });
+
+  app.on('exit', (code, signal) => {
+
+    if (pipeFd) {
+      fs.closeSync(pipeFd); // silently close pipe fd
+    }
+    if (pipeFilename) {
+      fs.unlinkSync(pipeFilename); // silently remove old pipe file
+    }
+    pipeFd = undefined;
+    pipeFilename = undefined;
+    childApp = undefined;
+
+    // Exit code is non-null when the runner exits on it's own
+    if (code !== null) {
+      console.log('Runner crashed, restarting...')
+      restartApp();
+    }
+  });
 
   app.on('message', (data) => {
     const filename = data.filename;
