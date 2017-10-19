@@ -11,6 +11,7 @@ const util = require('util');
 const fork = require('child_process').fork;
 const execSync = require('child_process').execSync;
 const commander = require('commander');
+const debounce = require('lodash.debounce')
 
 const RESTART_COMMAND = 'rs';
 
@@ -35,6 +36,7 @@ program.option('-L, --use-polling', 'In some filesystems watch events may not wo
 program.option('-D, --disable-autowatch', 'Don\'t automatically start watching changes in files "required" by the program');
 program.option('-H, --disable-ex-handler', 'Disable source-map-enhanced uncaught exception handler. (you may want to use this option in case your app registers a custom uncaught exception handler)');
 program.option('-m, --message [string]', 'Set custom message displayed on restart (default is ">>> RESTARTING <<<")');
+program.option('-c, --change-interval [number]', 'Coalesce change events happening more of then given amount of milliseconds. [100]')
 
 const pkg = require('./package.json');
 program.version(pkg.version);
@@ -77,12 +79,13 @@ program.parse(process.argv);
 
 const cwd = process.cwd();
 
-let only, ignore;
+let only, ignore, changeDebounceInterval;
 
 if (program.only != null) only = babel.util.arrayify(program.only, babel.util.regexify);
 if (program.ignore != null) ignore = babel.util.arrayify(program.ignore, babel.util.regexify);
 
 let transpileExtensions = babel.util.canCompile.EXTENSIONS;
+changeDebounceInterval = ~~program.changeInterval || 100;
 
 if (program.extensions) {
   transpileExtensions = transpileExtensions.concat(babel.util.arrayify(program.extensions));
@@ -120,9 +123,11 @@ process.on('SIGINT', function() {
   process.exit(1);
 });
 
-watcher.on('change', handleChange);
-watcher.on('add', handleChange);
-watcher.on('unlink', handleChange);
+const handleChangeDebounced = debounce(handleChange, changeDebounceInterval)
+
+watcher.on('change', handleChangeDebounced);
+watcher.on('add', handleChangeDebounced);
+watcher.on('unlink', handleChangeDebounced);
 
 watcher.on('ready', () => {
   if (!watcherInitialized) {
