@@ -36,7 +36,7 @@ program.option('-L, --use-polling', 'In some filesystems watch events may not wo
 program.option('-D, --disable-autowatch', 'Don\'t automatically start watching changes in files "required" by the program');
 program.option('-H, --disable-ex-handler', 'Disable source-map-enhanced uncaught exception handler. (you may want to use this option in case your app registers a custom uncaught exception handler)');
 program.option('-m, --message [string]', 'Set custom message displayed on restart (default is ">>> RESTARTING <<<")');
-program.option('-c, --change-interval [number]', 'Coalesce change events happening more of then given amount of milliseconds. [100]')
+program.option('-c, --change-interval [number]', 'Coalesce change events happening more of then given amount of milliseconds. [300]')
 
 const pkg = require('./package.json');
 program.version(pkg.version);
