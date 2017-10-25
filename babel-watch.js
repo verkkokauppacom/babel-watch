@@ -79,13 +79,13 @@ program.parse(process.argv);
 
 const cwd = process.cwd();
 
-let only, ignore, changeDebounceInterval;
+let only, ignore;
 
 if (program.only != null) only = babel.util.arrayify(program.only, babel.util.regexify);
 if (program.ignore != null) ignore = babel.util.arrayify(program.ignore, babel.util.regexify);
 
 let transpileExtensions = babel.util.canCompile.EXTENSIONS;
-changeDebounceInterval = ~~program.changeInterval || 100;
+const restartDebounceInterval = ~~program.changeInterval || 300;
 
 if (program.extensions) {
   transpileExtensions = transpileExtensions.concat(babel.util.arrayify(program.extensions));
@@ -123,11 +123,11 @@ process.on('SIGINT', function() {
   process.exit(1);
 });
 
-const handleChangeDebounced = debounce(handleChange, changeDebounceInterval)
+const restartApp = debounce(_restartApp, restartDebounceInterval)
 
-watcher.on('change', handleChangeDebounced);
-watcher.on('add', handleChangeDebounced);
-watcher.on('unlink', handleChangeDebounced);
+watcher.on('change', handleChange);
+watcher.on('add', handleChange);
+watcher.on('unlink', handleChange);
 
 watcher.on('ready', () => {
   if (!watcherInitialized) {
@@ -246,7 +246,7 @@ function prepareRestart() {
   }
 }
 
-function restartApp() {
+function _restartApp() {
   if (!watcherInitialized) return;
   prepareRestart();
 }
