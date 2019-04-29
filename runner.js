@@ -8,7 +8,7 @@ let sources = {};
 let maps = {};
 
 let pipeFd;
-const BUFFER = new Buffer(10 * 1024);
+const BUFFER = new Buffer.alloc(10 * 1024);
 
 // Node by default uses '.js' loader to load all the files with unknown extensions
 const DEFAULT_LOADER = require.extensions['.js'];
@@ -23,7 +23,7 @@ function readLength(fd) {
 
 function readFileFromPipeSync(fd) {
   let length = readLength(fd);
-  let result = new Buffer(0);
+  let result = new Buffer.alloc(0);
   while (length > 0) {
     const newBytes = fs.readSync(fd, BUFFER, 0, Math.min(BUFFER.length, length));
     length -= newBytes;
@@ -41,6 +41,7 @@ function babelWatchLoader(module_, filename, defaultHandler) {
   // require writing native code which usually brings large
   // dependencies to the project and I prefer to avoid that
   process.send({
+    event: 'babel-watch-filename',
     filename: filename,
   });
   const source = readFileFromPipeSync(pipeFd);
@@ -85,6 +86,7 @@ function replaceExtensionHooks(extensions) {
 }
 
 process.on('message', (options) => {
+  if (!options || options.event !== 'babel-watch-start') return;
   replaceExtensionHooks(options.transpileExtensions);
   sourceMapSupport.install({
     environment: 'node',

@@ -7,13 +7,15 @@ const path = require('path');
 const babel = require('@babel/core');
 const fs = require('fs');
 const os = require('os');
-const util = require('util');
 const fork = require('child_process').fork;
 const execSync = require('child_process').execSync;
 const commander = require('commander');
-const debounce = require('lodash.debounce')
+const debounce = require('lodash.debounce');
+const isString = require('lodash.isstring');
+const isRegExp = require('lodash.isregexp');
 
 const RESTART_COMMAND = 'rs';
+const DEBOUNCE_DURATION = 100; //milliseconds
 
 const program = new commander.Command("babel-watch");
 
@@ -26,22 +28,24 @@ function collect(val, memo) {
 // https://github.com/babel/babel/commit/0df0c696a93889f029982bf36d34346a039b1920
 function regexify(val) {
   if (!val) return new RegExp;
-  if (_.isArray(val)) val = val.join("|");
-  if (_.isString(val)) return new RegExp(val || "");
-  if (_.isRegExp(val)) return val;
+  if (Array.isArray(val)) val = val.join("|");
+  if (isString(val)) return new RegExp(val || "");
+  if (isRegExp(val)) return val;
   throw new TypeError("illegal type for regexify");
 };
- 
+
 function arrayify(val) {
   if (!val) return [];
-  if (_.isString(val)) return exports.list(val);
-  if (_.isArray(val)) return val;
+  if (isString(val)) return (val ? val.split(',') : []);
+  if (Array.isArray(val)) return val;
   throw new TypeError("illegal type for arrayify");
 };
 
+
 program.option('-d, --debug [port]', 'Set debugger port')
 program.option('-B, --debug-brk', 'Enable debug break mode')
-program.option('-I, --inspect', 'Enable inspect mode')
+program.option('-I, --inspect [address]', 'Enable inspect mode')
+program.option('-X, --inspect-brk [address]', 'Enable inspect break mode')
 program.option('-o, --only [globs]', 'Matching files will be transpiled');
 program.option('-i, --ignore [globs]', 'Matching files will not be transpiled');
 program.option('-e, --extensions [extensions]', 'List of extensions to hook into [.es6,.js,.es,.jsx]');
@@ -69,12 +73,6 @@ program.on('--help', () => {
   monitor changes in. You can disable "autowatch" with -D option or limit the list of files it will be enabled for
   using the option -x (--exclude).
 
-  Babel.js configuration:
-
-  You may use some of the options listed above to customize plugins/presets and matching files that babel.js
-  is going to use while transpiling your app's source files but we recommend that you use .babelrc file as
-  babel-watch works with .babelrc just fine.
-
   IMPORTANT:
 
   babel-watch is meant to **only** be used during development. In order to support fast reload cycles it uses more
@@ -85,7 +83,7 @@ program.on('--help', () => {
 
     $ babel-watch server.js
     $ babel-watch -x templates server.js
-    $ babel-watch --presets es2015 server.js --port 8080
+    $ babel-watch server.js --port 8080
 
   See more:
 
@@ -98,11 +96,11 @@ const cwd = process.cwd();
 
 let only, ignore;
 
-if (program.only != null) only = babel.util.arrayify(program.only, regexify);
-if (program.ignore != null) ignore = babel.util.arrayify(program.ignore, regexify);
+
+if (program.only != null) only = arrayify(program.only, regexify);
+if (program.ignore != null) ignore = arrayify(program.ignore, regexify);
 
 let transpileExtensions = babel.DEFAULT_EXTENSIONS;
-const restartDebounceInterval = ~~program.changeInterval || 300;
 
 if (program.extensions) {
   transpileExtensions = transpileExtensions.concat(arrayify(program.extensions));
@@ -116,11 +114,6 @@ if (!mainModule) {
 if (!mainModule.startsWith('.') && !mainModule.startsWith('/')) {
   program.args[0] = path.join(cwd, mainModule);
 }
-
-const transformOpts = {
-  plugins: program.plugins,
-  presets: program.presets,
-};
 
 let childApp, pipeFd, pipeFilename;
 
@@ -137,14 +130,15 @@ let watcherInitialized = (program.watch.length === 0);
 
 process.on('SIGINT', function() {
   watcher.close();
-  process.exit(1);
+  killApp();
+  process.exit(0);
 });
 
-const restartApp = debounce(_restartApp, restartDebounceInterval)
+const debouncedHandleChange = debounce(handleChange, DEBOUNCE_DURATION);
 
-watcher.on('change', handleChange);
-watcher.on('add', handleChange);
-watcher.on('unlink', handleChange);
+watcher.on('change', debouncedHandleChange);
+watcher.on('add', debouncedHandleChange);
+watcher.on('unlink', debouncedHandleChange);
 
 watcher.on('ready', () => {
   if (!watcherInitialized) {
@@ -248,11 +242,45 @@ function killChildProcess(childProcess) {
 
 function killApp() {
   if (childApp) {
-    killChildProcess(childApp).then(restartAppInternal,
-      (e) => {
-        console.log('Could not kill subprocess, aborting', e)
-        process.exit(1)
-      })
+    const currentPipeFd = pipeFd;
+
+    let hasRestarted = false;
+    const restartOnce = () => {
+      if (hasRestarted) return;
+      hasRestarted = true;
+      if (currentPipeFd) {
+        fs.closeSync(currentPipeFd); // silently close pipe fd
+      }
+      if (pipeFilename) {
+        fs.unlinkSync(pipeFilename); // silently remove old pipe file
+      }
+      pipeFd = undefined;
+      childApp = undefined;
+      pipeFilename = undefined;
+      restartAppInternal();
+    };
+    childApp.on('exit', restartOnce);
+    let isRunning = true;
+    try {
+      process.kill(childApp.pid, 0);
+    } catch (e) {
+      isRunning = false;
+    }
+    if (isRunning) {
+      try {
+        childApp.kill('SIGHUP');
+      } catch (error) {
+        childApp.kill('SIGKILL');
+      }
+      pipeFd = undefined;
+      pipeFilename = undefined;
+      childApp = undefined;
+    } else {
+      pipeFd = undefined;
+      pipeFilename = undefined;
+      childApp = undefined;
+      restartOnce();
+    }
   }
 }
 
@@ -267,7 +295,7 @@ function prepareRestart() {
   }
 }
 
-function _restartApp() {
+function restartApp() {
   if (!watcherInitialized) return;
   prepareRestart();
 }
@@ -299,15 +327,29 @@ function restartAppInternal() {
   // Support for --debug option
   const runnerExecArgv = process.execArgv.slice();
   if (program.debug) {
-    runnerExecArgv.push('--debug=' + program.debug);
+    runnerExecArgv.push(typeof(program.debug) === 'boolean'
+      ? `--debug`
+      : `--debug=${program.debug}`
+    )
+  }
+  // Support for --debug-brk option
+  if(program.debugBrk) {
+    runnerExecArgv.push('--debug-brk');
   }
   // Support for --inspect option
   if (program.inspect) {
-    runnerExecArgv.push('--inspect');
+    // Somehow, the default port (2992) is being passed from the node command line. Wipe it out.
+    const inspectArg = typeof(program.inspect) === 'boolean'
+     ? `--inspect`
+     : `--inspect=${program.inspect}`
+    runnerExecArgv.push(inspectArg);
   }
-  // Support for --debug-brk
-  if(program.debugBrk) {
-    runnerExecArgv.push('--debug-brk');
+  // Support for --inspect-brk option
+  if (program.inspectBrk) {
+    const inspectBrkArg = typeof(program.inspectBrk) === 'boolean'
+    ? `--inspect-brk`
+    : `--inspect-brk=${program.inspectBrk}`
+    runnerExecArgv.push(inspectBrkArg)
   }
 
   const app = fork(path.resolve(__dirname, 'runner.js'), { execArgv: runnerExecArgv });
@@ -337,6 +379,7 @@ function restartAppInternal() {
   });
 
   app.on('message', (data) => {
+    if (!data || data.event !== 'babel-watch-filename') return;
     const filename = data.filename;
     if (!program.disableAutowatch) {
       // use relative path for watch.add as it would let chokidar reconsile exclude patterns
@@ -344,27 +387,30 @@ function restartAppInternal() {
       watcher.add(relativeFilename);
     }
     handleFileLoad(filename, (source, sourceMap) => {
-      const sourceBuf = new Buffer(source || 0);
-      const mapBuf = new Buffer(sourceMap ? JSON.stringify(sourceMap) : 0);
-      const lenBuf = new Buffer(4);
-      try {
-        lenBuf.writeUInt32BE(sourceBuf.length, 0);
-        fs.writeSync(pipeFd, lenBuf, 0, 4);
-        sourceBuf.length && fs.writeSync(pipeFd, sourceBuf, 0, sourceBuf.length);
+      const sourceBuf = new Buffer.from(source || '');
+      const mapBuf = new Buffer.from(sourceMap ? JSON.stringify(sourceMap) : 0);
+      const lenBuf = new Buffer.alloc(4);
+      if (pipeFd) {
+        try {
+          lenBuf.writeUInt32BE(sourceBuf.length, 0);
+          fs.writeSync(pipeFd, lenBuf, 0, 4);
+          sourceBuf.length && fs.writeSync(pipeFd, sourceBuf, 0, sourceBuf.length);
 
-        lenBuf.writeUInt32BE(mapBuf.length, 0);
-        fs.writeSync(pipeFd, lenBuf, 0, 4);
-        mapBuf.length && fs.writeSync(pipeFd, mapBuf, 0, mapBuf.length);
-      } catch (error) {
-        // EPIPE means `pipeFd` has been closed. We can ignore this
-        if (error.code !== 'EPIPE') {
-          throw error;
+          lenBuf.writeUInt32BE(mapBuf.length, 0);
+          fs.writeSync(pipeFd, lenBuf, 0, 4);
+          mapBuf.length && fs.writeSync(pipeFd, mapBuf, 0, mapBuf.length);
+        } catch (error) {
+          // EPIPE means `pipeFd` has been closed. We can ignore this
+          if (error.code !== 'EPIPE') {
+            throw error;
+          }
         }
       }
     });
   });
 
   app.send({
+    event: 'babel-watch-start',
     pipe: pipeFilename,
     args: program.args,
     handleUncaughtExceptions: !program.disableExHandler,
@@ -384,6 +430,7 @@ function shouldIgnore(filename) {
     return babel.util.shouldIgnore(filename, ignore || [], only);
   }
 }
+
 
 function compile(filename, callback) {
   const optsManager = new babel.OptionManager;
